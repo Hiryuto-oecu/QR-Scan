@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QRコードスキャナー</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+      background: #1a1a2e;
+      color: #eee;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 8px;
+      color: #e0e0ff;
+      letter-spacing: 0.05em;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      color: #aaa;
+      margin-bottom: 24px;
+      text-align: center;
+    }
+
+    #scanner-wrapper {
+      position: relative;
+      width: 100%;
+      max-width: 400px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 0 0 3px #4a4aff44, 0 8px 32px #0008;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      object-fit: cover;
+      background: #000;
+    }
+
+    /* scanning frame overlay */
+    #scanner-frame {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    #scanner-frame::before,
+    #scanner-frame::after {
+      content: '';
+      position: absolute;
+      width: 56px;
+      height: 56px;
+      border-color: #4a90e2;
+      border-style: solid;
+    }
+
+    #scanner-frame::before {
+      top: 16px;
+      left: 16px;
+      border-width: 4px 0 0 4px;
+      border-radius: 6px 0 0 0;
+    }
+
+    #scanner-frame::after {
+      bottom: 16px;
+      right: 16px;
+      border-width: 0 4px 4px 0;
+      border-radius: 0 0 6px 0;
+    }
+
+    .frame-corner {
+      position: absolute;
+      width: 56px;
+      height: 56px;
+      border-color: #4a90e2;
+      border-style: solid;
+      pointer-events: none;
+    }
+
+    .frame-corner.top-right {
+      top: 16px;
+      right: 16px;
+      border-width: 4px 4px 0 0;
+      border-radius: 0 6px 0 0;
+    }
+
+    .frame-corner.bottom-left {
+      bottom: 16px;
+      left: 16px;
+      border-width: 0 0 4px 4px;
+      border-radius: 0 0 0 6px;
+    }
+
+    /* scanning line animation */
+    #scan-line {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, #4a90e2, transparent);
+      animation: scan 2s linear infinite;
+      opacity: 0.8;
+    }
+
+    @keyframes scan {
+      0%   { top: 16px; }
+      100% { top: calc(100% - 18px); }
+    }
+
+    canvas {
+      display: none;
+    }
+
+    #status {
+      margin-top: 20px;
+      font-size: 0.95rem;
+      text-align: center;
+      min-height: 2.5em;
+      color: #ccc;
+    }
+
+    #status.success {
+      color: #4caf50;
+      font-weight: bold;
+    }
+
+    #status.error {
+      color: #ef5350;
+    }
+
+    #status.scanning {
+      color: #4a90e2;
+    }
+
+    #start-btn {
+      margin-top: 24px;
+      padding: 12px 32px;
+      font-size: 1rem;
+      font-weight: bold;
+      background: #4a90e2;
+      color: #fff;
+      border: none;
+      border-radius: 32px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    #start-btn:hover {
+      background: #357abd;
+    }
+
+    #start-btn:disabled {
+      background: #555;
+      cursor: default;
+    }
+  </style>
+</head>
+<body>
+  <h1>📷 QRコードスキャナー</h1>
+  <p class="subtitle">スキャン対象：https://link.oecu-gi.jp から始まるURL</p>
+
+  <div id="scanner-wrapper">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="scanner-frame">
+      <div class="frame-corner top-right"></div>
+      <div class="frame-corner bottom-left"></div>
+    </div>
+    <div id="scan-line"></div>
+  </div>
+
+  <canvas id="canvas"></canvas>
+
+  <p id="status">カメラを起動するには下のボタンを押してください。</p>
+  <button id="start-btn">カメラを起動する</button>
+
+  <!-- jsQR: pure-JS QR code decoder, no build tools required -->
+  <script
+    src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"
+    integrity="sha384-b5Ya4Bq3qCyz39m2ISh+4DxjAIljdeFwK/BsXLuj9gugaNwAcj/ia15fxNZL9Nlx"
+    crossorigin="anonymous"></script>
+  <script>
+    const ALLOWED_HOSTNAME = 'link.oecu-gi.jp';
+
+    const video   = document.getElementById('video');
+    const canvas  = document.getElementById('canvas');
+    const ctx     = canvas.getContext('2d');
+    const status  = document.getElementById('status');
+    const btn     = document.getElementById('start-btn');
+
+    let scanning = false;
+
+    btn.addEventListener('click', startCamera);
+
+    async function startCamera() {
+      btn.disabled = true;
+      status.className = '';
+      status.textContent = 'カメラへのアクセスを要求中...';
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } }
+        });
+        video.srcObject = stream;
+        video.play();
+        scanning = true;
+        status.className = 'scanning';
+        status.textContent = 'スキャン中...';
+        requestAnimationFrame(tick);
+      } catch (err) {
+        btn.disabled = false;
+        status.className = 'error';
+        if (err.name === 'NotAllowedError') {
+          status.textContent = 'カメラへのアクセスが拒否されました。ブラウザの設定を確認してください。';
+        } else {
+          status.textContent = 'カメラの起動に失敗しました: ' + err.message;
+        }
+      }
+    }
+
+    function tick() {
+      if (!scanning) return;
+
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width  = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'dontInvert'
+        });
+
+        if (code) {
+          handleDetected(code.data);
+          return; // stop the loop after detection
+        }
+      }
+
+      requestAnimationFrame(tick);
+    }
+
+    function handleDetected(url) {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch (_) {
+        parsed = null;
+      }
+
+      if (parsed && parsed.protocol === 'https:' && parsed.hostname === ALLOWED_HOSTNAME) {
+        scanning = false;
+        status.className = 'success';
+        status.textContent = '✅ QRコードを検出しました。移動中...';
+        window.location.href = url;
+      } else {
+        // show a brief message and keep scanning
+        status.className = 'error';
+        status.textContent = '⚠️ このQRコードは対象外のURLです。';
+        setTimeout(() => {
+          if (scanning) {
+            status.className = 'scanning';
+            status.textContent = 'スキャン中...';
+          }
+        }, 2000);
+        requestAnimationFrame(tick);
+      }
+    }
+  </script>
+</body>
+</html>
